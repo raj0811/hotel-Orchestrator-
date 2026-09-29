@@ -16,7 +16,9 @@ The project uses **NestJS, TypeScript, Temporal, Redis, Docker, and PostgreSQL (
 * Keep hotels that are available from only one supplier
 * Cache hotel results in Redis
 * Filter hotels by minimum and maximum price
-* Dockerized infrastructure
+* Dockerized application and infrastructure
+* Temporal Worker runs automatically through Docker Compose
+* Temporal UI for workflow monitoring
 * Health check endpoint for suppliers
 * Postman-compatible REST APIs
 
@@ -38,42 +40,69 @@ The project uses **NestJS, TypeScript, Temporal, Redis, Docker, and PostgreSQL (
 ## Architecture
 
 ```text
-                    Client
-                      |
-                      v
-              NestJS REST API
-                      |
-                      v
-               Hotels Service
-                      |
-                 Check Redis
-                  /       \
-               HIT         MISS
-                |            |
-                |            v
-                |       Temporal Workflow
-                |          /        \
-                |         v          v
-                |    Supplier A   Supplier B
-                |         \          /
-                |          \        /
-                |           v      v
-                |        Compare & Deduplicate
-                |               |
-                |               v
-                |             Redis
-                |               |
-                +---------------+
-                        |
-                        v
-                    Response
+                         Client
+                           |
+                           v
+                    NestJS REST API
+                           |
+                           v
+                     Hotels Service
+                           |
+                     Check Redis
+                       /      \
+                    HIT        MISS
+                     |           |
+                     |           v
+                     |    Temporal Workflow
+                     |       /          \
+                     |      v            v
+                     | Supplier A     Supplier B
+                     |   Activity       Activity
+                     |      \            /
+                     |       \          /
+                     |        v        v
+                     |    Compare & Deduplicate
+                     |             |
+                     |             v
+                     |           Redis
+                     |             |
+                     +-------------+
+                           |
+                           v
+                       Response
+```
+
+### Docker Architecture
+
+```text
+                         Docker Compose
+                              |
+        +---------------------+---------------------+
+        |                     |                     |
+        v                     v                     v
+   NestJS Backend       Temporal Worker          Redis
+      :4000                  |                   :6379
+        |                    |
+        |                    v
+        |              Temporal Server
+        |                  :7233
+        |                    |
+        |                    v
+        |                PostgreSQL
+        |                  :5432
+        |
+        +--------------------+
+                             |
+                             v
+                       Temporal UI
+                          :8080
 ```
 
 ---
 
-## API Endpoints
+# API Endpoints
 
-### 1. Get Supplier A Hotels
+## 1. Get Supplier A Hotels
 
 ```http
 GET /supplierA/hotels?city=delhi
@@ -85,9 +114,11 @@ Example:
 curl "http://localhost:4000/supplierA/hotels?city=delhi"
 ```
 
+Returns hotel offers available from Supplier A for the requested city.
+
 ---
 
-### 2. Get Supplier B Hotels
+## 2. Get Supplier B Hotels
 
 ```http
 GET /supplierB/hotels?city=delhi
@@ -99,9 +130,11 @@ Example:
 curl "http://localhost:4000/supplierB/hotels?city=delhi"
 ```
 
+Returns hotel offers available from Supplier B for the requested city.
+
 ---
 
-### 3. Get Aggregated Hotels
+## 3. Get Aggregated Hotels
 
 ```http
 GET /api/hotels?city=delhi
@@ -115,11 +148,13 @@ curl "http://localhost:4000/api/hotels?city=delhi"
 
 The API:
 
-1. Gets hotels from both suppliers.
-2. Compares overlapping hotels.
-3. Selects the cheaper offer.
-4. Keeps hotels available from only one supplier.
-5. Returns the final deduplicated list.
+1. Gets hotels from both suppliers through Temporal.
+2. Runs Supplier A and Supplier B activities in parallel.
+3. Compares overlapping hotels.
+4. Selects the cheaper offer.
+5. Keeps hotels available from only one supplier.
+6. Stores the final result in Redis.
+7. Returns the aggregated hotel list.
 
 Example response:
 
@@ -144,7 +179,7 @@ Example response:
 
 ---
 
-### 4. Filter Hotels by Price
+## 4. Filter Hotels by Price
 
 ```http
 GET /api/hotels?city=delhi&minPrice=5000&maxPrice=7000
@@ -164,9 +199,25 @@ Parameters:
 | `minPrice` | No       | Minimum hotel price |
 | `maxPrice` | No       | Maximum hotel price |
 
+Both `minPrice` and `maxPrice` are optional.
+
+Examples:
+
+```http
+GET /api/hotels?city=delhi&minPrice=5000
+```
+
+```http
+GET /api/hotels?city=delhi&maxPrice=7000
+```
+
+```http
+GET /api/hotels?city=delhi&minPrice=5000&maxPrice=7000
+```
+
 ---
 
-### 5. Health Check
+## 5. Health Check
 
 ```http
 GET /health
@@ -190,9 +241,11 @@ Example response:
 }
 ```
 
+The health check verifies whether the mock supplier datasets are available.
+
 ---
 
-## Mock Suppliers
+# Mock Suppliers
 
 The project contains two mock hotel suppliers.
 
@@ -221,55 +274,140 @@ Supplier B → ₹5340
 Selected → Supplier B
 ```
 
-This allows the application to demonstrate the hotel deduplication and price comparison logic.
+This allows the application to demonstrate:
+
+* Supplier aggregation
+* Duplicate hotel detection
+* Price comparison
+* Cheapest offer selection
+* Supplier-specific offers
 
 ---
 
-## Temporal Workflow
+# Temporal Workflow
 
 Temporal is used to orchestrate the hotel aggregation workflow.
 
-The workflow executes supplier activities in parallel:
+The workflow executes Supplier A and Supplier B activities in parallel.
 
 ```text
-              Hotel Workflow
-                    |
-          +---------+---------+
-          |                   |
-          v                   v
-   Supplier A Activity   Supplier B Activity
-          |                   |
-          +---------+---------+
-                    |
-                    v
-             Compare Prices
-                    |
-                    v
-              Deduplicate
-                    |
-                    v
-             Final Hotel List
+                    Hotel Workflow
+                          |
+                    +-----+-----+
+                    |           |
+                    v           v
+             Supplier A     Supplier B
+              Activity       Activity
+                    |           |
+                    +-----+-----+
+                          |
+                          v
+                   Compare Prices
+                          |
+                          v
+                     Deduplicate
+                          |
+                          v
+                   Final Hotel List
+                          |
+                          v
+                        Redis
 ```
 
-### Temporal Components
+## Temporal Components
 
-* **Workflow** - defines the hotel aggregation process
-* **Activities** - fetch data from Supplier A and Supplier B
-* **Worker** - executes the workflow and activities
-* **Temporal Server** - manages workflow execution and state
+### Workflow
+
+Defines the overall hotel aggregation process.
+
+The workflow coordinates the supplier activities and combines their results.
+
+### Activities
+
+Activities are responsible for fetching hotel data from Supplier A and Supplier B.
+
+### Worker
+
+The Temporal Worker executes the workflow and activities.
+
+The worker runs automatically as a separate Docker Compose service.
+
+### Temporal Server
+
+The Temporal Server manages workflow execution, task queues, workflow state, and persistence.
+
+### PostgreSQL
+
+PostgreSQL is used by Temporal for its internal persistence.
+
+The application itself does not use PostgreSQL as the hotel database.
 
 ---
 
-## Redis
+# Parallel Supplier Fetching
 
-Redis is used for caching hotel results.
+Supplier A and Supplier B are fetched in parallel by the Temporal workflow.
 
-A repeated request can return the cached result instead of executing the complete workflow again.
-
-Example:
+Conceptually:
 
 ```text
-First request
+                    Workflow
+                       |
+              +--------+--------+
+              |                 |
+              v                 v
+        Supplier A         Supplier B
+              |                 |
+              +--------+--------+
+                       |
+                       v
+                 Merge Results
+                       |
+                       v
+                Deduplicate
+                       |
+                       v
+               Select Cheapest
+```
+
+Running the supplier activities in parallel avoids waiting for one supplier to finish before starting the other.
+
+---
+
+# Hotel Deduplication
+
+Hotels are deduplicated using the hotel name.
+
+When the same hotel exists in both suppliers:
+
+```text
+Supplier A
+Holtin → ₹6000
+
+Supplier B
+Holtin → ₹5340
+```
+
+The cheaper offer is selected:
+
+```text
+Holtin → ₹5340 → Supplier B
+```
+
+If a hotel exists only in one supplier, that offer is retained.
+
+---
+
+# Redis
+
+Redis is used for storing aggregated hotel results.
+
+The application can avoid executing the complete Temporal workflow when a previously generated result is available in Redis.
+
+Conceptually:
+
+```text
+First Request
      |
      v
 Redis MISS
@@ -278,10 +416,16 @@ Redis MISS
 Temporal Workflow
      |
      v
-Save result to Redis
+Aggregate Hotels
+     |
+     v
+Save Result to Redis
+     |
+     v
+Return Response
 ```
 
-Next identical request:
+A subsequent request can use the cached result:
 
 ```text
 Request
@@ -290,10 +434,16 @@ Request
 Redis HIT
    |
    v
-Return cached result
+Return Cached Result
 ```
 
-Redis runs on:
+Redis runs inside Docker at:
+
+```text
+redis:6379
+```
+
+From the host machine, Redis is exposed at:
 
 ```text
 localhost:6379
@@ -301,33 +451,79 @@ localhost:6379
 
 ---
 
-## Docker
+# Docker
 
-Docker Compose is used to run the infrastructure required by the application.
+Docker Compose is used to run the complete application stack.
 
-Services include:
+The following services are started automatically:
 
 ```text
-NestJS Application
-Redis
-Temporal
+NestJS Backend
+Temporal Worker
+Temporal Server
 Temporal UI
+Redis
 PostgreSQL
 ```
 
-### Start Docker Services
+## Start the Application
+
+After cloning the repository, run:
 
 ```bash
-docker compose up -d
+docker compose up --build -d
 ```
 
-Check running containers:
+This builds the backend and worker images and starts the complete application.
+
+Check the running containers:
 
 ```bash
 docker compose ps
 ```
 
-Stop services:
+Expected services:
+
+```text
+hotel-backend
+hotel-worker
+hotel-temporal
+hotel-temporal-ui
+hotel-redis
+hotel-postgres
+```
+
+---
+
+## View Logs
+
+### Backend
+
+```bash
+docker compose logs backend --tail=50
+```
+
+### Temporal Worker
+
+```bash
+docker compose logs worker --tail=50
+```
+
+### Temporal Server
+
+```bash
+docker compose logs temporal --tail=50
+```
+
+### Redis
+
+```bash
+docker compose logs redis --tail=50
+```
+
+---
+
+## Stop the Application
 
 ```bash
 docker compose down
@@ -335,7 +531,18 @@ docker compose down
 
 ---
 
-## Temporal UI
+## Rebuild the Application
+
+After making code changes:
+
+```bash
+docker compose down
+docker compose up --build -d
+```
+
+---
+
+# Temporal UI
 
 Temporal UI is available at:
 
@@ -343,13 +550,20 @@ Temporal UI is available at:
 http://localhost:8080
 ```
 
-It can be used to inspect workflow executions and their status.
+The UI can be used to inspect:
+
+* Workflow executions
+* Workflow status
+* Workflow history
+* Task queues
+* Workflow failures
+* Activity execution
 
 ---
 
-## Local Development
+# Local Development
 
-### Prerequisites
+## Prerequisites
 
 Make sure the following are installed:
 
@@ -360,7 +574,7 @@ Make sure the following are installed:
 
 ---
 
-### 1. Clone the repository
+## 1. Clone the Repository
 
 ```bash
 git clone <YOUR_GITHUB_REPOSITORY_URL>
@@ -372,61 +586,92 @@ cd Hotel
 
 ---
 
-### 2. Install dependencies
+## 2. Start the Complete Application
+
+The recommended way to run the project is using Docker Compose:
 
 ```bash
-npm install
+docker compose up --build -d
 ```
+
+This starts:
+
+* NestJS Backend
+* Temporal Worker
+* Temporal Server
+* Temporal UI
+* Redis
+* PostgreSQL
+
+No separate `npm run start:dev` or `npm run worker` command is required when using Docker Compose.
 
 ---
 
-### 3. Start Docker services
-
-```bash
-docker compose up -d
-```
-
-Verify:
+## 3. Verify Services
 
 ```bash
 docker compose ps
 ```
 
+All six services should be running.
+
 ---
 
-### 4. Start NestJS
+## 4. Test the Backend
 
-```bash
-npm run start:dev
-```
-
-The application runs on:
+Health check:
 
 ```text
+http://localhost:4000/health
+```
+
+Aggregated hotels:
+
+```text
+http://localhost:4000/api/hotels?city=delhi
+```
+
+Supplier A:
+
+```text
+http://localhost:4000/supplierA/hotels?city=delhi
+```
+
+Supplier B:
+
+```text
+http://localhost:4000/supplierB/hotels?city=delhi
+```
+
+---
+
+# Environment
+
+When running the complete application through Docker Compose, Docker service names are used for communication between containers.
+
+## Docker Addresses
+
+```text
+NestJS Backend:
+backend:4000
+
+Redis:
+redis:6379
+
+Temporal:
+temporal:7233
+
+PostgreSQL:
+postgres:5432
+```
+
+## Host Addresses
+
+From the host machine:
+
+```text
+Backend:
 http://localhost:4000
-```
-
----
-
-### 5. Start Temporal Worker
-
-Run the Temporal worker separately:
-
-```bash
-npm run worker
-```
-
-The worker connects to the Temporal server and executes the hotel workflow.
-
----
-
-## Environment
-
-For local development, the services use the following addresses:
-
-```text
-NestJS:
-localhost:4000
 
 Redis:
 localhost:6379
@@ -435,24 +680,30 @@ Temporal:
 localhost:7233
 
 Temporal UI:
-localhost:8080
+http://localhost:8080
 
 PostgreSQL:
 localhost:5432
 ```
 
-When running the application entirely inside Docker Compose, Docker service names should be used instead of `localhost`.
-
-For example:
+The backend uses:
 
 ```text
-redis:6379
-temporal:7233
+PORT=4000
+REDIS_HOST=redis
+REDIS_PORT=6379
+TEMPORAL_ADDRESS=temporal:7233
+```
+
+The Temporal Worker uses:
+
+```text
+TEMPORAL_ADDRESS=temporal:7233
 ```
 
 ---
 
-## Project Structure
+# Project Structure
 
 ```text
 src/
@@ -460,13 +711,13 @@ src/
 ├── hotels/
 │   ├── hotels.controller.ts
 │   ├── hotels.service.ts
-│   ├── hotels.module.ts
-│   │
-│   └── temporal/
-│       ├── hotel.workflow.ts
-│       ├── hotel.activities.ts
-│       ├── temporal.client.ts
-│       └── worker.ts
+│   └── hotels.module.ts
+│
+├── temporal/
+│   ├── hotel.workflow.ts
+│   ├── hotel.activities.ts
+│   ├── temporal.client.ts
+│   └── worker.ts
 │
 ├── redis/
 │   ├── redis.service.ts
@@ -487,7 +738,7 @@ tsconfig.json
 
 ---
 
-## Error Handling
+# Error Handling
 
 The API validates the required `city` parameter.
 
@@ -497,37 +748,61 @@ Example:
 GET /api/hotels
 ```
 
-returns a validation error because `city` is required.
+The request requires the `city` query parameter.
 
-The Temporal workflow can also handle supplier activity failures through Temporal's retry mechanism.
+Temporal activities are executed through the Temporal Worker, allowing Temporal's workflow execution and activity retry mechanisms to handle activity failures.
 
 ---
 
-## Testing
+# Testing
 
 The project can be tested using Postman or cURL.
 
-### Test Cases
+## Test Cases
 
-#### Valid city
+### Valid City
 
 ```http
 GET /api/hotels?city=delhi
 ```
 
-#### City with no results
+### City With No Results
 
 ```http
 GET /api/hotels?city=mumbai
 ```
 
-#### Price filtering
+### Price Filtering
 
 ```http
 GET /api/hotels?city=delhi&minPrice=5000&maxPrice=7000
 ```
 
-#### Health check
+### Minimum Price Only
+
+```http
+GET /api/hotels?city=delhi&minPrice=5000
+```
+
+### Maximum Price Only
+
+```http
+GET /api/hotels?city=delhi&maxPrice=7000
+```
+
+### Supplier A
+
+```http
+GET /supplierA/hotels?city=delhi
+```
+
+### Supplier B
+
+```http
+GET /supplierB/hotels?city=delhi
+```
+
+### Health Check
 
 ```http
 GET /health
@@ -535,7 +810,7 @@ GET /health
 
 ---
 
-## Postman Collection
+# Postman Collection
 
 A Postman collection is included in:
 
@@ -543,27 +818,81 @@ A Postman collection is included in:
 postman/hotel-offer.postman_collection.json
 ```
 
-Import the collection into Postman to test all available endpoints.
+Import the collection into Postman to test the available REST APIs.
+
+The application can also be tested using the cURL examples provided in this README.
 
 ---
 
-## Future Improvements
+# Docker Compose Services
+
+| Service       | Purpose                  | Port |
+| ------------- | ------------------------ | ---: |
+| `backend`     | NestJS REST API          | 4000 |
+| `worker`      | Temporal Workflow Worker |    - |
+| `temporal`    | Temporal Server          | 7233 |
+| `temporal-ui` | Temporal Web UI          | 8080 |
+| `redis`       | Hotel result cache       | 6379 |
+| `postgres`    | Temporal persistence     | 5432 |
+
+---
+
+# Quick Start
+
+For evaluators, the complete application can be started with:
+
+```bash
+git clone https://github.com/raj0811/hotel-Orchestrator-.git
+cd Hotel
+docker compose up --build -d
+```
+
+Verify:
+
+```bash
+docker compose ps
+```
+
+Then open:
+
+```text
+Backend:
+http://localhost:4000/health
+
+Hotel API:
+http://localhost:4000/api/hotels?city=delhi
+
+Temporal UI:
+http://localhost:8080
+```
+
+To stop:
+
+```bash
+docker compose down
+```
+
+---
+
+# Future Improvements
 
 Possible improvements include:
 
 * Real supplier API integrations
 * Supplier timeout handling
-* More advanced Redis caching
+* Advanced Redis caching strategies
 * Authentication and authorization
 * Rate limiting
 * Structured logging
 * Monitoring and metrics
 * Additional supplier integrations
-* Automated tests
+* Automated unit and integration tests
+* Distributed tracing
+* Circuit breaker for supplier failures
 
 ---
 
-## Author
+# Author
 
 **Raj Barmaiya**
 

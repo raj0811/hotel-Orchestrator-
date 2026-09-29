@@ -27,4 +27,9 @@ export class HotelsController {
             maxPrice ? Number(maxPrice) : undefined,
         );
     }
+
+    @Get('health')
+    getHealth() {
+        return this.hotelsService.checkSuppliersHealth();
+    }
 }

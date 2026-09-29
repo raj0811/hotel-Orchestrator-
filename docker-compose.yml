@@ -15,6 +15,16 @@ services:
       - redis
       - temporal
 
+  worker:
+    build:
+      context: .
+    container_name: hotel-worker
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    command: npm run worker
+    depends_on:
+      - temporal
+
   temporal:
     image: temporalio/auto-setup:latest
     container_name: hotel-temporal
