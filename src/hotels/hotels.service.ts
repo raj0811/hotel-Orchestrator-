@@ -15,15 +15,20 @@ export class HotelsService {
         supplier: 'A' | 'B',
         city: string,
     ) {
-        if (!city) {
-            throw new BadRequestException('city is required');
+        try {
+
+            if (!city) {
+                throw new BadRequestException('city is required');
+            }
+
+            const hotels = supplier === 'A' ? supplierA : supplierB;
+
+            return hotels.filter(
+                hotel => hotel.city.toLowerCase() === city.toLowerCase(),
+            );
+        } catch (e) {
+            throw new BadRequestException(e.message)
         }
-
-        const hotels = supplier === 'A' ? supplierA : supplierB;
-
-        return hotels.filter(
-            hotel => hotel.city.toLowerCase() === city.toLowerCase(),
-        );
     }
 
     async getHotels(
@@ -31,73 +36,84 @@ export class HotelsService {
         minPrice?: number,
         maxPrice?: number,
     ) {
-        if (!city) {
-            throw new BadRequestException('city is required');
-        }
+        try {
 
-        // Unique cache key
-        const cacheKey =
-            `hotels:${city}:${minPrice ?? 'none'}:${maxPrice ?? 'none'}`;
 
-        // 1. Check Redis
-        const cachedHotels = await this.redisService.get(cacheKey);
+            if (!city) {
+                throw new BadRequestException('city is required');
+            }
 
-        if (cachedHotels) {
-            console.log('Returning data from Redis');
+            // Unique cache key
+            const cacheKey =
+                `hotels:${city}:${minPrice ?? 'none'}:${maxPrice ?? 'none'}`;
 
-            return cachedHotels;
-        }
+            // 1. Check Redis
+            const cachedHotels = await this.redisService.get(cacheKey);
 
-        console.log('Starting Temporal workflow...');
+            if (cachedHotels) {
+                console.log('Returning data from Redis');
 
-        // 2. Get Temporal client
-        const client = await getTemporalClient();
+                return cachedHotels;
+            }
 
-        // 3. Start Temporal workflow
-        const result = await client.workflow.execute(hotelWorkflow, {
-            taskQueue: 'hotel-task-queue',
+            console.log('Starting Temporal workflow...');
 
-            workflowId: `hotel-${city}-${Date.now()}`,
+            // 2. Get Temporal client
+            const client = await getTemporalClient();
 
-            args: [city],
-        });
+            // 3. Start Temporal workflow
+            const result = await client.workflow.execute(hotelWorkflow, {
+                taskQueue: 'hotel-task-queue',
 
-        // 4. Apply price filter
-        let hotels = result;
+                workflowId: `hotel-${city}-${Date.now()}`,
 
-        if (minPrice !== undefined) {
-            hotels = hotels.filter(
-                hotel => hotel.price >= minPrice,
+                args: [city],
+            });
+
+            // 4. Apply price filter
+            let hotels = result;
+
+            if (minPrice !== undefined) {
+                hotels = hotels.filter(
+                    hotel => hotel.price >= minPrice,
+                );
+            }
+
+            if (maxPrice !== undefined) {
+                hotels = hotels.filter(
+                    hotel => hotel.price <= maxPrice,
+                );
+            }
+
+            // 5. Save result to Redis
+            await this.redisService.set(
+                cacheKey,
+                hotels,
             );
+
+            return hotels;
+        } catch (e) {
+            throw new BadRequestException(e.message)
         }
-
-        if (maxPrice !== undefined) {
-            hotels = hotels.filter(
-                hotel => hotel.price <= maxPrice,
-            );
-        }
-
-        // 5. Save result to Redis
-        await this.redisService.set(
-            cacheKey,
-            hotels,
-        );
-
-        return hotels;
     }
 
     async checkSuppliersHealth() {
-        const supplierAHealthy = supplierA.length > 0;
-        const supplierBHealthy = supplierB.length > 0;
+        try {
 
-        const allHealthy = supplierAHealthy && supplierBHealthy;
+            const supplierAHealthy = supplierA.length > 0;
+            const supplierBHealthy = supplierB.length > 0;
 
-        return {
-            status: allHealthy ? 'ok' : 'degraded',
-            suppliers: {
-                supplierA: supplierAHealthy ? 'healthy' : 'unhealthy',
-                supplierB: supplierBHealthy ? 'healthy' : 'unhealthy',
-            },
-        };
+            const allHealthy = supplierAHealthy && supplierBHealthy;
+
+            return {
+                status: allHealthy ? 'ok' : 'degraded',
+                suppliers: {
+                    supplierA: supplierAHealthy ? 'healthy' : 'unhealthy',
+                    supplierB: supplierBHealthy ? 'healthy' : 'unhealthy',
+                },
+            };
+        } catch (e) {
+            throw new BadRequestException(e.message)
+        }
     }
 }
